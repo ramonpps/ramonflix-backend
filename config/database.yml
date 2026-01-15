@@ -12,7 +12,19 @@ test:
   database: storage/test.sqlite3
 
 production:
-  <<: *default
-  # No Render, este arquivo será criado no disco efêmero
-  # e apagado quando o servidor reiniciar. Perfeito para seu uso.
-  database: storage/production.sqlite3
+  # O Rails 8 exige que definamos estas chaves separadas
+  primary:
+    <<: *default
+    database: storage/production.sqlite3
+  cache:
+    <<: *default
+    database: storage/production.sqlite3
+    migrations_paths: db/cache_migrate
+  queue:
+    <<: *default
+    database: storage/production.sqlite3
+    migrations_paths: db/queue_migrate
+  cable:
+    <<: *default
+    database: storage/production.sqlite3
+    migrations_paths: db/cable_migrate
