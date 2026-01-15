@@ -48,4 +48,3 @@ end
 
 gem "httparty", "~> 0.24.0"
 gem "rack-cors", "~> 3.0"
-gem "sqlite3", "~> 1.4"
