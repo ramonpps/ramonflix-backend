@@ -8,11 +8,10 @@ class StreamsController < ApplicationController
     episode = params[:episode]
     title_hint = params[:title_hint]
 
-    # Cache de 12 horas para ser instantâneo na segunda vez
-    cache_key = "stream_data_v2/#{imdb_id}/#{type}/#{season}/#{episode}"
+    # Cache na Memória RAM (Rápido e sem custo)
+    cache_key = "stream_v10_sqlite/#{imdb_id}/#{type}/#{season}/#{episode}"
 
     json_result = Rails.cache.fetch(cache_key, expires_in: 12.hours) do
-      puts "\n⚡ [CACHE MISS] Buscando dados frescos para #{imdb_id}..."
       fetch_data_parallel(imdb_id, type, season, episode, title_hint)
     end
 
@@ -23,87 +22,132 @@ class StreamsController < ApplicationController
 
   def fetch_data_parallel(imdb_id, type, season, episode, title_hint)
     meta_data = {}
-    streams_br = []
-    streams_global = []
+    streams_raw = []
 
-    # Thread 1: Metadados + Tradução
+    # Thread 1: Metadados
     t_meta = Thread.new do
       begin
         url_meta = "https://v3-cinemeta.strem.io/meta/#{type}/#{imdb_id}.json"
-        meta_response = HTTParty.get(url_meta, timeout: 4)
-        
-        if meta_response.success?
-          data = JSON.parse(meta_response.body)['meta']
-          original_title = data['name']
-          original_desc = data['description']
+        res = HTTParty.get(url_meta, timeout: 6)
+        if res.success?
+          data = JSON.parse(res.body)['meta']
           
-          translated_title = translate_google(original_title) 
-          translated_desc = translate_google(original_desc)
+          trans_title = translate_google(data['name']) 
+          trans_desc = translate_google(data['description'])
+          ep_title, ep_desc = nil, nil
+          
+          if type == 'series' && season.present? && episode.present?
+             target = data['videos']&.find { |v| v['season'].to_s == season.to_s && v['episode'].to_s == episode.to_s }
+             if target
+                ep_title = translate_google(target['name'] || "Episódio #{episode}")
+                ep_desc = translate_google(target['overview'] || target['description'])
+             end
+          end
 
           meta_data = {
-            name: translated_title,         
-            original_name: original_title,  
-            description: translated_desc,   
+            name: trans_title,         
+            original_name: data['name'],  
+            description: trans_desc,
+            episode_title: ep_title, 
+            episode_description: ep_desc,
             imdbRating: data['imdbRating'],
             cast: data['cast'] || [],
-            director: data['director'], # <--- CAMPO NOVO ADICIONADO
+            director: data['director'],
             poster: data['poster'],
             background: data['background'],
             year: data['releaseInfo']
           }
         end
-      rescue => e
-        meta_data = { name: URI.decode_www_form_component(title_hint || "") }
-      end
+      rescue; end
     end
 
+    # Threads de Busca (Unificadas)
     stream_id = (type == 'series') ? "#{imdb_id}:#{season}:#{episode}" : imdb_id
     
-    # Thread 2: Busca BR
+    # Busca BR
     t_br = Thread.new do
       begin
-        br_providers = "comando,bludv,lapumia,wayup,nezu,ondebaixa"
-        url = "https://torrentio.strem.fun/providers=#{br_providers}%7Clanguage=portuguese/stream/#{type}/#{stream_id}.json"
-        res = HTTParty.get(url, timeout: 8) 
-        streams_br = JSON.parse(res.body)['streams'] || [] if res.success?
-      rescue
-        streams_br = []
-      end
+        url = "https://torrentio.strem.fun/providers=comando,bludv,lapumia,wayup,nezu,ondebaixa%7Clanguage=portuguese/stream/#{type}/#{stream_id}.json"
+        res = HTTParty.get(url, timeout: 10) 
+        if res.success?
+           list = JSON.parse(res.body)['streams'] || []
+           list.each { |s| s['_origin'] = :br }
+           streams_raw.concat(list)
+        end
+      rescue; end
     end
 
-    # Thread 3: Busca Global
+    # Busca Global
     t_global = Thread.new do
       begin
         url = "https://torrentio.strem.fun/sort=seeders%7Cqualityfilter=4k/stream/#{type}/#{stream_id}.json"
-        res = HTTParty.get(url, timeout: 8)
-        streams_global = JSON.parse(res.body)['streams'] || [] if res.success?
-      rescue
-        streams_global = []
-      end
+        res = HTTParty.get(url, timeout: 10)
+        if res.success?
+           list = JSON.parse(res.body)['streams'] || []
+           list.each { |s| s['_origin'] = :global }
+           streams_raw.concat(list)
+        end
+      rescue; end
     end
 
     [t_meta, t_br, t_global].each(&:join)
 
-    process_streams = lambda do |list, source_type|
-      list.map do |stream|
-        score = source_type == :br ? 20000 : 0
-        if source_type == :global && meta_data[:original_name]
-           score += 5000 
+    # === PROCESSAMENTO UNIFICADO ===
+    dubbed_list = []
+    subtitled_list = []
+    
+    dubbed_regex = /dublado|dual|nacional|pt-br|portugues/i
+
+    streams_raw.each do |stream|
+      title = stream['title'].to_s.downcase
+      score = 0
+      valid = false
+
+      if type == 'series'
+        s_int = season.to_i; e_int = episode.to_i
+        
+        # Regex Específico (S01E01)
+        strict_regex = /(s0?#{s_int}[\s\.]*e0?#{e_int}(?![0-9]))|(\b#{s_int}x0?#{e_int}(?![0-9]))/i
+        # Regex Pack (S01 não seguido de E05)
+        pack_regex = /\b(s0?#{s_int}|season\W*0?#{s_int})\b(?![.\s-]*e\d+)/i
+
+        if title.match?(strict_regex)
+           valid = true; score = 10000
+        elsif title.match?(pack_regex)
+           valid = true; score = 8000
+           score += 500 if title.include?("complete") || title.include?("season")
+        else
+           score = -999999
         end
-        stream.merge('compatibility_score' => score)
+      else
+        valid = true; score = 10000
+        if stream['_origin'] == :global && meta_data[:original_name]
+           score += 5000 if title.include?(meta_data[:original_name].downcase.split(' ').first)
+        end
+      end
+
+      if score > 0
+         score += 2000 if title.include?('4k'); score += 1000 if title.include?('1080p')
+         
+         final_obj = format_stream(stream).merge('score' => score)
+         
+         if title.match?(dubbed_regex) || stream['_origin'] == :br
+            dubbed_list << final_obj
+         else
+            subtitled_list << final_obj
+         end
       end
     end
 
-    raw_dubbed = process_streams.call(streams_br, :br).select { |s| s['compatibility_score'] > 0 }
-    raw_subtitled = process_streams.call(streams_global, :global).select { |s| s['compatibility_score'] > 0 }
-
-    br_regex = /dublado|dual|nacional|pt-br|portugues/i
-    raw_subtitled = raw_subtitled.reject { |s| s['title'].match?(br_regex) }
+    dubbed_list.sort_by! { |s| -s['score'] }
+    subtitled_list.sort_by! { |s| -s['score'] }
+    dubbed_list.uniq! { |s| s[:infoHash] }
+    subtitled_list.uniq! { |s| s[:infoHash] }
 
     {
-      meta: meta_data,
-      dubbed: raw_dubbed.map { |s| format_stream(s) },
-      subtitled: raw_subtitled.map { |s| format_stream(s) }
+      meta: meta_data || { name: title_hint },
+      dubbed: dubbed_list,
+      subtitled: subtitled_list
     }
   end
 
@@ -113,8 +157,7 @@ class StreamsController < ApplicationController
       magnet: magnet_link,
       title: s['title'] || "Sem Título",
       name: s['name'] || "Torrent",
-      infoHash: s['infoHash'],
-      score: s['compatibility_score']
+      infoHash: s['infoHash']
     }
   end
 
@@ -125,8 +168,6 @@ class StreamsController < ApplicationController
     begin
       response = HTTParty.get(base_url, query: params, timeout: 1.5)
       JSON.parse(response.body)[0].map { |part| part[0] }.join
-    rescue
-      text
-    end
+    rescue; text; end
   end
 end
