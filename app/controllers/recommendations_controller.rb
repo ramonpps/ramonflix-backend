@@ -2,11 +2,11 @@ class RecommendationsController < ApplicationController
   require 'httparty'
 
   def random
-    # 1. Escolhe um gênero aleatório
-    genres = ['Action', 'Fantasy']
-    selected_genre = genres.sample
+    # Pega o gênero da URL ou escolhe um padrão
+    genre_param = params[:genre]
+    selected_genre = genre_param.present? ? genre_param : ['Action', 'Fantasy'].sample
     
-    # 2. URL do catálogo de Top Filmes do Cinemeta para esse gênero
+    # URL do catálogo
     url = "https://v3-cinemeta.strem.io/catalog/movie/top/genre=#{selected_genre}.json"
 
     begin
@@ -16,10 +16,8 @@ class RecommendationsController < ApplicationController
         movies = JSON.parse(response.body)['metas'] || []
         
         if movies.any?
-          # 3. Pega um filme aleatório da lista
           random_movie = movies.sample
           
-          # Retorna formatado para o Frontend
           render json: {
             imdb_id: random_movie['imdb_id'],
             title: random_movie['name'],

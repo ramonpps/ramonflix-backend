@@ -2,7 +2,7 @@ Rails.application.routes.draw do
 # Rota para buscar filmes/séries (ex: /search?q=Batman)
   get '/search', to: 'search#index'
   get '/random', to: 'recommendations#random' # <--- NOVA ROTA
-  
+  get '/home', to: 'home#index'
   # Rota para pegar os links processados (ex: /streams?imdb_id=tt123...)
   get '/streams', to: 'streams#index'
   # Define your application routes per the DSL in https://guides.rubyonrails.org/routing.html
