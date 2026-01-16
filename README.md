@@ -1,6 +1,6 @@
 # RamonFlix - Backend API
 Link para acesso do sistema em produção: https://ramonflix.vercel.app/
-Horários entre as 20h e 8h estão sujeitos a maior latência de tráfego
+<br>Horários entre as 20h e 8h estão sujeitos a maior latência de tráfego
 
 Este repositório contém a API RESTful do projeto RamonFlix, desenvolvida em **Ruby on Rails**. Esta aplicação atua como o "cérebro" da arquitetura de microsserviços do projeto, sendo responsável pela orquestração de dados, gerenciamento de catálogo e lógica de negócios para a entrega de conteúdo.
 
@@ -9,6 +9,10 @@ O backend foi projetado para operar em **API Only Mode**, servindo dados JSON ot
 ## Sobre o Projeto
 
 O RamonFlix é uma prova de conceito de uma plataforma de streaming. O papel deste backend é agregar informações de APIs públicas de filmes (como Cinemeta e TMDB) e processar as solicitações de reprodução.
+
+Frontend: https://github.com/ramonpps/ramonflix-frontend/ <br>
+Backend: https://github.com/ramonpps/ramonflix-backend <br>
+Stream service: https://github.com/ramonpps/ramonflix-stream-service <br>
 
 > **Nota de Implementação:** Para garantir a viabilidade do projeto como portfólio público, este backend implementa uma camada de segurança lógica ("Safe Mode"). Ao receber uma solicitação de streaming para um filme comercial, a API intercepta a requisição e retorna links magnéticos de conteúdo Open Source (Creative Commons), garantindo que a tecnologia P2P possa ser demonstrada sem infração de direitos autorais.
 
