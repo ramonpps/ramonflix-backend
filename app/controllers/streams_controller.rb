@@ -3,171 +3,108 @@ class StreamsController < ApplicationController
 
   def index
     imdb_id = params[:imdb_id]
-    type = params[:type]
-    season = params[:season]
-    episode = params[:episode]
-    title_hint = params[:title_hint]
+    type = params[:type] # 'movie' ou 'series'
+    title = params[:title_hint]
+    
+    # Lista final de torrents
+    streams = []
 
-    # Cache na Memória RAM (Rápido e sem custo)
-    cache_key = "stream_v10_sqlite/#{imdb_id}/#{type}/#{season}/#{episode}"
-
-    json_result = Rails.cache.fetch(cache_key, expires_in: 12.hours) do
-      fetch_data_parallel(imdb_id, type, season, episode, title_hint)
+    # 1. Se for FILME, busca no YTS (Yify) - É a fonte mais estável
+    if type == 'movie'
+      yts_streams = fetch_from_yts(imdb_id, title)
+      streams.concat(yts_streams)
     end
 
-    render json: json_result
+    # 2. Se o YTS não retornou nada ou se for SÉRIE, tenta o Torrentio
+    # (Adicionamos headers para tentar evitar bloqueio)
+    if streams.empty? || type == 'series'
+      torrentio_streams = fetch_from_torrentio(imdb_id, type, params[:season], params[:episode])
+      streams.concat(torrentio_streams)
+    end
+
+    render json: streams
   end
 
   private
 
-  def fetch_data_parallel(imdb_id, type, season, episode, title_hint)
-    meta_data = {}
-    streams_raw = []
-
-    # Thread 1: Metadados
-    t_meta = Thread.new do
-      begin
-        url_meta = "https://v3-cinemeta.strem.io/meta/#{type}/#{imdb_id}.json"
-        res = HTTParty.get(url_meta, timeout: 6)
-        if res.success?
-          data = JSON.parse(res.body)['meta']
-          
-          trans_title = translate_google(data['name']) 
-          trans_desc = translate_google(data['description'])
-          ep_title, ep_desc = nil, nil
-          
-          if type == 'series' && season.present? && episode.present?
-             target = data['videos']&.find { |v| v['season'].to_s == season.to_s && v['episode'].to_s == episode.to_s }
-             if target
-                ep_title = translate_google(target['name'] || "Episódio #{episode}")
-                ep_desc = translate_google(target['overview'] || target['description'])
-             end
-          end
-
-          meta_data = {
-            name: trans_title,         
-            original_name: data['name'],  
-            description: trans_desc,
-            episode_title: ep_title, 
-            episode_description: ep_desc,
-            imdbRating: data['imdbRating'],
-            cast: data['cast'] || [],
-            director: data['director'],
-            poster: data['poster'],
-            background: data['background'],
-            year: data['releaseInfo']
-          }
-        end
-      rescue; end
-    end
-
-    # Threads de Busca (Unificadas)
-    stream_id = (type == 'series') ? "#{imdb_id}:#{season}:#{episode}" : imdb_id
-    
-    # Busca BR
-    t_br = Thread.new do
-      begin
-        url = "https://torrentio.strem.fun/providers=comando,bludv,lapumia,wayup,nezu,ondebaixa%7Clanguage=portuguese/stream/#{type}/#{stream_id}.json"
-        res = HTTParty.get(url, timeout: 10) 
-        if res.success?
-           list = JSON.parse(res.body)['streams'] || []
-           list.each { |s| s['_origin'] = :br }
-           streams_raw.concat(list)
-        end
-      rescue; end
-    end
-
-    # Busca Global
-    t_global = Thread.new do
-      begin
-        url = "https://torrentio.strem.fun/sort=seeders%7Cqualityfilter=4k/stream/#{type}/#{stream_id}.json"
-        res = HTTParty.get(url, timeout: 10)
-        if res.success?
-           list = JSON.parse(res.body)['streams'] || []
-           list.each { |s| s['_origin'] = :global }
-           streams_raw.concat(list)
-        end
-      rescue; end
-    end
-
-    [t_meta, t_br, t_global].each(&:join)
-
-    # === PROCESSAMENTO UNIFICADO ===
-    dubbed_list = []
-    subtitled_list = []
-    
-    dubbed_regex = /dublado|dual|nacional|pt-br|portugues/i
-
-    streams_raw.each do |stream|
-      title = stream['title'].to_s.downcase
-      score = 0
-      valid = false
-
-      if type == 'series'
-        s_int = season.to_i; e_int = episode.to_i
-        
-        # Regex Específico (S01E01)
-        strict_regex = /(s0?#{s_int}[\s\.]*e0?#{e_int}(?![0-9]))|(\b#{s_int}x0?#{e_int}(?![0-9]))/i
-        # Regex Pack (S01 não seguido de E05)
-        pack_regex = /\b(s0?#{s_int}|season\W*0?#{s_int})\b(?![.\s-]*e\d+)/i
-
-        if title.match?(strict_regex)
-           valid = true; score = 10000
-        elsif title.match?(pack_regex)
-           valid = true; score = 8000
-           score += 500 if title.include?("complete") || title.include?("season")
-        else
-           score = -999999
-        end
-      else
-        valid = true; score = 10000
-        if stream['_origin'] == :global && meta_data[:original_name]
-           score += 5000 if title.include?(meta_data[:original_name].downcase.split(' ').first)
-        end
-      end
-
-      if score > 0
-         score += 2000 if title.include?('4k'); score += 1000 if title.include?('1080p')
-         
-         final_obj = format_stream(stream).merge('score' => score)
-         
-         if title.match?(dubbed_regex) || stream['_origin'] == :br
-            dubbed_list << final_obj
-         else
-            subtitled_list << final_obj
-         end
-      end
-    end
-
-    dubbed_list.sort_by! { |s| -s['score'] }
-    subtitled_list.sort_by! { |s| -s['score'] }
-    dubbed_list.uniq! { |s| s[:infoHash] }
-    subtitled_list.uniq! { |s| s[:infoHash] }
-
-    {
-      meta: meta_data || { name: title_hint },
-      dubbed: dubbed_list,
-      subtitled: subtitled_list
-    }
-  end
-
-  def format_stream(s)
-    magnet_link = s['magnet'] || "magnet:?xt=urn:btih:#{s['infoHash']}"
-    {
-      magnet: magnet_link,
-      title: s['title'] || "Sem Título",
-      name: s['name'] || "Torrent",
-      infoHash: s['infoHash']
-    }
-  end
-
-  def translate_google(text)
-    return text if text.blank?
-    base_url = "https://translate.googleapis.com/translate_a/single"
-    params = { client: "gtx", sl: "en", tl: "pt", dt: "t", q: text }
+  def fetch_from_yts(imdb_id, title)
     begin
-      response = HTTParty.get(base_url, query: params, timeout: 1.5)
-      JSON.parse(response.body)[0].map { |part| part[0] }.join
-    rescue; text; end
+      url = "https://yts.mx/api/v2/list_movies.json?query_term=#{imdb_id}"
+      response = HTTParty.get(url, timeout: 5)
+      
+      return [] unless response.code == 200
+
+      data = JSON.parse(response.body)
+      return [] unless data['data'] && data['data']['movies']
+
+      movie = data['data']['movies'].first
+      return [] unless movie
+
+      # Formata para o padrão que seu frontend espera
+      results = movie['torrents'].map do |torrent|
+        {
+          title: "YTS #{torrent['quality']} - #{torrent['type'].capitalize} (#{torrent['size']})",
+          infoHash: torrent['hash'],
+          fileIdx: 0, # YTS geralmente é arquivo único
+          sources: [
+            "dht:#{torrent['hash']}",
+            "tr:udp://open.demonii.com:1337/announce",
+            "tr:udp://tracker.openbittorrent.com:80",
+            "tr:udp://tracker.coppersurfer.tk:6969",
+            "tr:udp://glotorrents.pw:6969/announce",
+            "tr:udp://tracker.opentrackr.org:1337/announce"
+          ]
+        }
+      end
+      
+      # Adiciona o título do filme no log para debug
+      puts "⚡ [YTS] Encontrados #{results.length} torrents para #{title}"
+      return results
+
+    rescue StandardError => e
+      puts "❌ [YTS Error] #{e.message}"
+      return []
+    end
+  end
+
+  def fetch_from_torrentio(imdb_id, type, season, episode)
+    begin
+      # Constrói a URL do Torrentio
+      identifier = type == 'series' ? "#{imdb_id}:#{season}:#{episode}" : imdb_id
+      url = "https://torrentio.strem.fun/stream/#{type}/#{identifier}.json"
+
+      # Cabeçalhos para fingir ser um navegador (Evita bloqueio do Render)
+      headers = {
+        "User-Agent" => "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept" => "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language" => "en-US,en;q=0.5"
+      }
+
+      response = HTTParty.get(url, headers: headers, timeout: 8)
+      
+      return [] unless response.code == 200
+      
+      data = JSON.parse(response.body)
+      return [] unless data['streams']
+
+      # Mapeia o retorno do Torrentio
+      results = data['streams'].map do |stream|
+        {
+          title: stream['title'].split("\n").first, # Limpa o título
+          infoHash: stream['infoHash'],
+          fileIdx: stream['fileIdx'] || 0,
+          sources: [
+            "dht:#{stream['infoHash']}"
+          ]
+        }
+      end
+
+      puts "⚡ [TORRENTIO] Encontrados #{results.length} torrents."
+      return results
+
+    rescue StandardError => e
+      puts "❌ [Torrentio Error] #{e.message}"
+      return []
+    end
   end
 end
