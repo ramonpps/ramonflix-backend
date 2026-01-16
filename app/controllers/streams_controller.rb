@@ -1,124 +1,81 @@
 class StreamsController < ApplicationController
-  require 'httparty'
+  # Não precisamos mais de HTTParty para requisições externas arriscadas
 
   def index
+    # Recebemos os parâmetros, mas para fins de demonstração técnica,
+    # retornaremos conteúdo licenciado Creative Commons de alta qualidade.
     imdb_id = params[:imdb_id]
-    type = params[:type]
-    title = params[:title_hint]
+    title_hint = params[:title_hint] || "Título Desconhecido"
     
-    streams = []
+    puts "🎥 [Stream Engine] Solicitando mídia para ID: #{imdb_id} (#{title_hint})"
 
-    # 1. Tenta buscar no The Pirate Bay (APIBay) pelo código IMDB (Mais preciso)
-    # Funciona bem para filmes populares
-    puts "🔍 [TPB] Buscando por IMDB: #{imdb_id}"
-    tpb_streams = fetch_from_apibay(imdb_id)
-    streams.concat(tpb_streams)
+    # Seleciona um conteúdo legal baseado no ID (ou aleatório para variar a demo)
+    # Isso simula uma consulta ao banco de dados de ativos da empresa.
+    media_asset = select_legal_content(imdb_id)
 
-    # 2. Se não achou nada pelo código, busca pelo TÍTULO (Fallback)
-    if streams.empty? && title.present?
-      puts "🔍 [TPB] Buscando por Título: #{title}"
-      tpb_title_streams = fetch_from_apibay(title)
-      # Filtra resultados para garantir que não venha lixo
-      streams.concat(tpb_title_streams.take(5)) 
-    end
+    # Monta a resposta no formato que o WebTorrent frontend espera
+    streams = [
+      {
+        title: "High Quality Stream: #{media_asset[:name]} (Open Movie Project)",
+        infoHash: media_asset[:infoHash],
+        fileIdx: 0,
+        sources: media_asset[:sources]
+      }
+    ]
 
-    # 3. Backup: Torrentio (Se ainda estiver vazio)
-    if streams.empty?
-      puts "🔍 [Torrentio] Tentando backup..."
-      torrentio_streams = fetch_from_torrentio(imdb_id, type, params[:season], params[:episode])
-      streams.concat(torrentio_streams)
-    end
-
-    # Remove duplicatas baseadas no Hash
-    streams.uniq! { |s| s[:infoHash] }
-
-    puts "✅ [FINAL] Retornando #{streams.length} opções."
+    puts "✅ [Stream Engine] Ativo '#{media_asset[:name]}' preparado para streaming."
     render json: streams
   end
 
   private
 
-  def fetch_from_apibay(query)
-    begin
-      # APIBay não bloqueia servidores facilmente
-      url = "https://apibay.org/q.php?q=#{URI.encode_www_form_component(query)}"
-      
-      response = HTTParty.get(url, timeout: 10)
-      
-      if response.code != 200
-        puts "❌ [TPB Error] Status Code: #{response.code}"
-        return [] 
-      end
-
-      data = JSON.parse(response.body)
-
-      # APIBay retorna [{name: 'No results returned', ...}] quando não acha nada
-      return [] if data.is_a?(Array) && data.first && data.first['name'] == 'No results returned'
-      return [] unless data.is_a?(Array)
-
-      # Formata para o padrão do frontend
-      results = data.map do |torrent|
-        {
-          title: "TPB: #{torrent['name']}",
-          infoHash: torrent['info_hash'],
-          fileIdx: 0,
-          sources: [
-            "dht:#{torrent['info_hash']}",
-            "tr:udp://tracker.coppersurfer.tk:6969/announce",
-            "tr:udp://tracker.openbittorrent.com:80/announce",
-            "tr:udp://opentrackr.org:1337/announce",
-            "tr:udp://9.rarbg.to:2710/announce"
-          ]
-        }
-      end
-      
-      # Ordena por Seeds (mais seeds = mais rápido) e pega os top 10
-      results.sort_by! { |r| -r[:seeders].to_i rescue 0 }.take(10)
-
-      puts "⚡ [TPB] Encontrados #{results.length} torrents para '#{query}'"
-      return results
-
-    rescue StandardError => e
-      puts "❌ [TPB Exception] #{e.message}"
-      return []
-    end
-  end
-
-  def fetch_from_torrentio(imdb_id, type, season, episode)
-    begin
-      identifier = type == 'series' ? "#{imdb_id}:#{season}:#{episode}" : imdb_id
-      url = "https://torrentio.strem.fun/stream/#{type}/#{identifier}.json"
-
-      # Headers para evitar bloqueio 403/429
-      headers = {
-        "User-Agent" => "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+  # Catálogo de filmes Open Source (Creative Commons)
+  # Estes filmes são 100% legais para distribuição e streaming.
+  def select_legal_content(id)
+    catalog = [
+      {
+        name: "Sintel (4K)",
+        infoHash: "08ada5a7a6183aae1e09d831df6748d566095a10",
+        sources: [
+          "dht:08ada5a7a6183aae1e09d831df6748d566095a10",
+          "tr:udp://tracker.leechers-paradise.org:6969",
+          "tr:udp://tracker.coppersurfer.tk:6969",
+          "tr:udp://tracker.opentrackr.org:1337",
+          "tr:udp://explodie.org:6969",
+          "tr:udp://9.rarbg.me:2970/announce"
+        ]
+      },
+      {
+        name: "Big Buck Bunny",
+        infoHash: "dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c",
+        sources: [
+          "dht:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c",
+          "tr:udp://tracker.leechers-paradise.org:6969",
+          "tr:udp://tracker.coppersurfer.tk:6969"
+        ]
+      },
+      {
+        name: "Tears of Steel (Sci-Fi)",
+        infoHash: "209c8226b299b308beaf2b9cd3fb49212dbd13ec",
+        sources: [
+          "dht:209c8226b299b308beaf2b9cd3fb49212dbd13ec",
+          "tr:udp://tracker.leechers-paradise.org:6969",
+          "tr:udp://tracker.coppersurfer.tk:6969"
+        ]
+      },
+      {
+        name: "Cosmos Laundromat",
+        infoHash: "c424de29e701981261a867b938f292c2df6a0248",
+        sources: [
+           "dht:c424de29e701981261a867b938f292c2df6a0248",
+           "tr:udp://tracker.leechers-paradise.org:6969"
+        ]
       }
+    ]
 
-      response = HTTParty.get(url, headers: headers, timeout: 5)
-      
-      if response.code != 200
-        puts "❌ [Torrentio Error] Falha com status: #{response.code}"
-        return []
-      end
-      
-      data = JSON.parse(response.body)
-      return [] unless data['streams']
-
-      results = data['streams'].map do |stream|
-        {
-          title: stream['title'].split("\n").first,
-          infoHash: stream['infoHash'],
-          fileIdx: stream['fileIdx'] || 0,
-          sources: ["dht:#{stream['infoHash']}"]
-        }
-      end
-
-      puts "⚡ [Torrentio] Encontrados #{results.length} torrents."
-      return results
-
-    rescue StandardError => e
-      puts "❌ [Torrentio Exception] #{e.message}"
-      return []
-    end
+    # Para fins de portfólio, podemos rotacionar o conteúdo
+    # ou usar o ID para determinar qual filme tocar (hash simples)
+    index = id.hash.abs % catalog.length
+    catalog[index]
   end
 end
