@@ -3,107 +3,121 @@ class StreamsController < ApplicationController
 
   def index
     imdb_id = params[:imdb_id]
-    type = params[:type] # 'movie' ou 'series'
+    type = params[:type]
     title = params[:title_hint]
     
-    # Lista final de torrents
     streams = []
 
-    # 1. Se for FILME, busca no YTS (Yify) - É a fonte mais estável
-    if type == 'movie'
-      yts_streams = fetch_from_yts(imdb_id, title)
-      streams.concat(yts_streams)
+    # 1. Tenta buscar no The Pirate Bay (APIBay) pelo código IMDB (Mais preciso)
+    # Funciona bem para filmes populares
+    puts "🔍 [TPB] Buscando por IMDB: #{imdb_id}"
+    tpb_streams = fetch_from_apibay(imdb_id)
+    streams.concat(tpb_streams)
+
+    # 2. Se não achou nada pelo código, busca pelo TÍTULO (Fallback)
+    if streams.empty? && title.present?
+      puts "🔍 [TPB] Buscando por Título: #{title}"
+      tpb_title_streams = fetch_from_apibay(title)
+      # Filtra resultados para garantir que não venha lixo
+      streams.concat(tpb_title_streams.take(5)) 
     end
 
-    # 2. Se o YTS não retornou nada ou se for SÉRIE, tenta o Torrentio
-    # (Adicionamos headers para tentar evitar bloqueio)
-    if streams.empty? || type == 'series'
+    # 3. Backup: Torrentio (Se ainda estiver vazio)
+    if streams.empty?
+      puts "🔍 [Torrentio] Tentando backup..."
       torrentio_streams = fetch_from_torrentio(imdb_id, type, params[:season], params[:episode])
       streams.concat(torrentio_streams)
     end
 
+    # Remove duplicatas baseadas no Hash
+    streams.uniq! { |s| s[:infoHash] }
+
+    puts "✅ [FINAL] Retornando #{streams.length} opções."
     render json: streams
   end
 
   private
 
-  def fetch_from_yts(imdb_id, title)
+  def fetch_from_apibay(query)
     begin
-      url = "https://yts.mx/api/v2/list_movies.json?query_term=#{imdb_id}"
-      response = HTTParty.get(url, timeout: 5)
+      # APIBay não bloqueia servidores facilmente
+      url = "https://apibay.org/q.php?q=#{URI.encode_www_form_component(query)}"
       
-      return [] unless response.code == 200
+      response = HTTParty.get(url, timeout: 10)
+      
+      if response.code != 200
+        puts "❌ [TPB Error] Status Code: #{response.code}"
+        return [] 
+      end
 
       data = JSON.parse(response.body)
-      return [] unless data['data'] && data['data']['movies']
 
-      movie = data['data']['movies'].first
-      return [] unless movie
+      # APIBay retorna [{name: 'No results returned', ...}] quando não acha nada
+      return [] if data.is_a?(Array) && data.first && data.first['name'] == 'No results returned'
+      return [] unless data.is_a?(Array)
 
-      # Formata para o padrão que seu frontend espera
-      results = movie['torrents'].map do |torrent|
+      # Formata para o padrão do frontend
+      results = data.map do |torrent|
         {
-          title: "YTS #{torrent['quality']} - #{torrent['type'].capitalize} (#{torrent['size']})",
-          infoHash: torrent['hash'],
-          fileIdx: 0, # YTS geralmente é arquivo único
+          title: "TPB: #{torrent['name']}",
+          infoHash: torrent['info_hash'],
+          fileIdx: 0,
           sources: [
-            "dht:#{torrent['hash']}",
-            "tr:udp://open.demonii.com:1337/announce",
-            "tr:udp://tracker.openbittorrent.com:80",
-            "tr:udp://tracker.coppersurfer.tk:6969",
-            "tr:udp://glotorrents.pw:6969/announce",
-            "tr:udp://tracker.opentrackr.org:1337/announce"
+            "dht:#{torrent['info_hash']}",
+            "tr:udp://tracker.coppersurfer.tk:6969/announce",
+            "tr:udp://tracker.openbittorrent.com:80/announce",
+            "tr:udp://opentrackr.org:1337/announce",
+            "tr:udp://9.rarbg.to:2710/announce"
           ]
         }
       end
       
-      # Adiciona o título do filme no log para debug
-      puts "⚡ [YTS] Encontrados #{results.length} torrents para #{title}"
+      # Ordena por Seeds (mais seeds = mais rápido) e pega os top 10
+      results.sort_by! { |r| -r[:seeders].to_i rescue 0 }.take(10)
+
+      puts "⚡ [TPB] Encontrados #{results.length} torrents para '#{query}'"
       return results
 
     rescue StandardError => e
-      puts "❌ [YTS Error] #{e.message}"
+      puts "❌ [TPB Exception] #{e.message}"
       return []
     end
   end
 
   def fetch_from_torrentio(imdb_id, type, season, episode)
     begin
-      # Constrói a URL do Torrentio
       identifier = type == 'series' ? "#{imdb_id}:#{season}:#{episode}" : imdb_id
       url = "https://torrentio.strem.fun/stream/#{type}/#{identifier}.json"
 
-      # Cabeçalhos para fingir ser um navegador (Evita bloqueio do Render)
+      # Headers para evitar bloqueio 403/429
       headers = {
-        "User-Agent" => "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept" => "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language" => "en-US,en;q=0.5"
+        "User-Agent" => "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
       }
 
-      response = HTTParty.get(url, headers: headers, timeout: 8)
+      response = HTTParty.get(url, headers: headers, timeout: 5)
       
-      return [] unless response.code == 200
+      if response.code != 200
+        puts "❌ [Torrentio Error] Falha com status: #{response.code}"
+        return []
+      end
       
       data = JSON.parse(response.body)
       return [] unless data['streams']
 
-      # Mapeia o retorno do Torrentio
       results = data['streams'].map do |stream|
         {
-          title: stream['title'].split("\n").first, # Limpa o título
+          title: stream['title'].split("\n").first,
           infoHash: stream['infoHash'],
           fileIdx: stream['fileIdx'] || 0,
-          sources: [
-            "dht:#{stream['infoHash']}"
-          ]
+          sources: ["dht:#{stream['infoHash']}"]
         }
       end
 
-      puts "⚡ [TORRENTIO] Encontrados #{results.length} torrents."
+      puts "⚡ [Torrentio] Encontrados #{results.length} torrents."
       return results
 
     rescue StandardError => e
-      puts "❌ [Torrentio Error] #{e.message}"
+      puts "❌ [Torrentio Exception] #{e.message}"
       return []
     end
   end
