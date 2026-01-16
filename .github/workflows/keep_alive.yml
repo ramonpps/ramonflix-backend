@@ -1,0 +1,22 @@
+name: Keep Alive Portfolio
+
+on:
+  schedule:
+    # CRON: Minutos(*/14) Horas(11-22) DiaMes(*) Mes(*) DiaSemana(*)
+    # 11:00 UTC = 08:00 Brasil | 22:59 UTC = 19:59 Brasil
+    # Isso garante 12 horas de funcionamento contínuo por dia.
+    - cron: '*/14 11-22 * * *'
+  workflow_dispatch: # Permite rodar manualmente pelo botão "Run workflow" para testar
+
+jobs:
+  ping_services:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake up Backend (Rails)
+        # O parametro -I mostra apenas o cabeçalho (mais rápido)
+        # Substitua pela URL real do seu backend
+        run: curl -I https://ramonflix-api.onrender.com/home
+        
+      - name: Wake up Stream Engine (Node)
+        # Substitua pela URL real do seu serviço Node
+        run: curl -I https://ramonflix-stream.onrender.com/
